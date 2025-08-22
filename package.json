@@ -1,9 +1,8 @@
 {
-  "name": "kmrc-backend",
+  "name": "kmrc-backend-ollama",
   "version": "1.0.0",
-  "description": "KMRC LLM Proxy Backend",
+  "description": "KMRC Backend for AI Summarizer",
   "main": "server.js",
-  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
@@ -11,5 +10,7 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "node-fetch": "^3.3.2"
-  }
+  },
+  "type": "module"
 }
+
