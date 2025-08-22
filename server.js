@@ -1,48 +1,76 @@
-// server.js (Render deployment version - OpenAI API)
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 
 const app = express();
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
 
-// POST /summarize
-app.post("/summarize", async (req, res) => {
-  const { text } = req.body;
+// Health check
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", backend: "KMRC Summarizer" });
+});
+
+// Summarize endpoint
+app.post("/summarize-text", async (req, res) => {
+  const { query, text } = req.body;
   if (!text) return res.json({ error: "No text provided" });
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    // -----------------------------
+    // Option 1: Local Ollama (free)
+    // -----------------------------
+    if (process.env.USE_OLLAMA === "true") {
+      const ollamaResponse = await fetch("http://localhost:11434/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "llama3",
+          prompt: `Query: ${query}\n\nSummarize the following document:\n${text}`
+        })
+      });
+
+      const raw = await ollamaResponse.text();
+      let summary = "";
+      raw.split("\n").forEach(line => {
+        if (line.trim()) {
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.response) summary += parsed.response;
+          } catch {}
+        }
+      });
+
+      return res.json({ summary: summary || "No summary generated" });
+    }
+
+    // -----------------------------
+    // Option 2: Remote API (Groq)
+    // -----------------------------
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",   // fast & cheap model, change to gpt-4o if needed
+        model: "mixtral-8x7b-32768",
         messages: [
-          { role: "system", content: "You are a helpful assistant that summarizes documents." },
-          { role: "user", content: `Summarize this document:\n\n${text}` }
-        ],
-        temperature: 0.3
+          { role: "system", content: "You are a helpful assistant that summarizes KMRC project documents." },
+          { role: "user", content: text }
+        ]
       })
     });
 
     const data = await response.json();
-
-    if (data.error) {
-      return res.json({ error: data.error.message });
-    }
-
-    const summary = data.choices?.[0]?.message?.content || "No summary generated";
-    res.json({ summary });
+    res.json({ summary: data.choices?.[0]?.message?.content || "No summary" });
 
   } catch (err) {
+    console.error(err);
     res.json({ error: err.toString() });
   }
 });
 
-// Start server
+// Listen
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Backend running on http://localhost:${PORT}`));
