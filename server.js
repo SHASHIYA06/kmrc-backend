@@ -1,76 +1,60 @@
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
+import dotenv from "dotenv";
+import OpenAI from "openai";
+
+dotenv.config();
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: process.env.FRONTEND_URL || "*"  // Allow only your frontend domain, or * for dev
+}));
 app.use(express.json());
 
-// Health check
+// Health check endpoint
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", backend: "KMRC Summarizer" });
+  res.json({ status: "ok", backend: "KMRC Summarizer with DeepSeek" });
 });
 
-// Summarize endpoint
+// Summarize endpoint using OpenRouter DeepSeek model
 app.post("/summarize-text", async (req, res) => {
   const { query, text } = req.body;
-  if (!text) return res.json({ error: "No text provided" });
+  if (!text) return res.status(400).json({ error: "No text provided" });
 
   try {
-    // -----------------------------
-    // Option 1: Local Ollama (free)
-    // -----------------------------
-    if (process.env.USE_OLLAMA === "true") {
-      const ollamaResponse = await fetch("http://localhost:11434/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "llama3",
-          prompt: `Query: ${query}\n\nSummarize the following document:\n${text}`
-        })
-      });
-
-      const raw = await ollamaResponse.text();
-      let summary = "";
-      raw.split("\n").forEach(line => {
-        if (line.trim()) {
-          try {
-            const parsed = JSON.parse(line);
-            if (parsed.response) summary += parsed.response;
-          } catch {}
-        }
-      });
-
-      return res.json({ summary: summary || "No summary generated" });
-    }
-
-    // -----------------------------
-    // Option 2: Remote API (Groq)
-    // -----------------------------
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-        "Content-Type": "application/json"
+    // Using OpenRouter API with OpenAI SDK compatible client
+    const openai = new OpenAI({
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: process.env.OPENROUTER_API_KEY,
+      defaultHeaders: {
+        "HTTP-Referer": process.env.FRONTEND_URL,
+        "X-Title": "KMRC Summarizer Backend",
       },
-      body: JSON.stringify({
-        model: "mixtral-8x7b-32768",
-        messages: [
-          { role: "system", content: "You are a helpful assistant that summarizes KMRC project documents." },
-          { role: "user", content: text }
-        ]
-      })
     });
 
-    const data = await response.json();
-    res.json({ summary: data.choices?.[0]?.message?.content || "No summary" });
+    // Construct the prompt/messages
+    const messages = [
+      { role: "system", content: "You are a helpful assistant that summarizes KMRC project documents." },
+      { role: "user", content: `Query: ${query}\n\n${text}` }
+    ];
+
+    // Call the chat completion endpoint
+    const completion = await openai.chat.completions.create({
+      model: "deepseek/deepseek-chat-v3-0324:free",
+      messages,
+    });
+
+    res.json({ summary: completion.choices?.[0]?.message?.content || "No summary generated" });
 
   } catch (err) {
-    console.error(err);
-    res.json({ error: err.toString() });
+    console.error("Error during summarization:", err);
+    res.status(500).json({ error: "Failed to fetch summary" });
   }
 });
 
-// Listen
+// Listen on the specified PORT
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Backend running on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Backend running on port ${PORT}`);
+});
