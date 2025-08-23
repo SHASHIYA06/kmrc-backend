@@ -19,19 +19,27 @@ app.get("/health", (req, res) => {
 
 // Summarize endpoint using OpenRouter DeepSeek model
 app.post("/summarize-text", async (req, res) => {
+  console.log("Received summarize-text request. Body:", req.body);
   const { query, text } = req.body;
-  if (!text) return res.status(400).json({ error: "No text provided" });
+  if (!text) {
+    console.warn("No text provided");
+    return res.status(400).json({ error: "No text provided" });
+  }
 
   try {
-    // Using OpenRouter API with OpenAI SDK compatible client
-    const openai = new OpenAI({
-      baseURL: "https://openrouter.ai/api/v1",
-      apiKey: process.env.OPENROUTER_API_KEY,
-      defaultHeaders: {
-        "HTTP-Referer": process.env.FRONTEND_URL,
-        "X-Title": "KMRC Summarizer Backend",
-      },
-    });
+    // Call OpenRouter API as usual...
+
+    console.log("Sending request to OpenRouter with query:", query);
+    // After getting response
+    console.log("Received from OpenRouter:", completion.choices[0].message);
+
+    // Respond with summary
+  } catch (err) {
+    console.error("Error in summarize-text:", err);
+    res.status(500).json({ error: "Failed to fetch summary" });
+  }
+});
+
 
     // Construct the prompt/messages
     const messages = [
