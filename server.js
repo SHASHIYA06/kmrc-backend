@@ -75,19 +75,17 @@ async function callGemini(prompt) {
 /**
  * Endpoint: summarize across multiple files
  */
-app.post("/summarize-multi", upload.array("files"), async (req, res) => {
+// --- modify summarize-multi ---
+app.post("/summarize-multi", async (req, res) => {
   try {
-    const { query } = req.body;
-    if (!query || !req.files?.length) {
+    const { query, files } = req.body;
+    if (!query || !files?.length) {
       return res.status(400).json({ error: "Missing query or files" });
     }
 
     let prompt = `User query: ${query}\n\nExtracted file contents:\n`;
-
-    for (const file of req.files) {
-      const text = await extractText(file.path, file.mimetype);
-      prompt += `\n--- File: ${file.originalname} ---\n${text}\n`;
-      fs.unlinkSync(file.path);
+    for (const f of files) {
+      prompt += `\n--- File: ${f.name} (${f.meta}) ---\n${f.text}\n`;
     }
 
     const result = await callGemini(prompt);
@@ -97,6 +95,41 @@ app.post("/summarize-multi", upload.array("files"), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// --- NEW: keyword search across OCRText ---
+app.post("/search-multi", async (req, res) => {
+  try {
+    const { keyword, files } = req.body;
+    if (!keyword || !files?.length) {
+      return res.status(400).json({ error: "Missing keyword or files" });
+    }
+
+    let matches = [];
+    for (const f of files) {
+      if (f.text.toLowerCase().includes(keyword.toLowerCase())) {
+        matches.push({
+          file: f.name,
+          excerpt: f.text.substring(0, 500) + "..."
+        });
+      }
+    }
+
+    let response = "Matches:\n";
+    matches.forEach(m => {
+      response += `\nFile: ${m.file}\nExcerpt: ${m.excerpt}\n`;
+    });
+
+    const result = await callGemini(
+      `The user searched for keyword: "${keyword}". Here are the matches:\n${response}\n\nSummarize and explain findings clearly.`
+    );
+
+    res.json({ result, matches });
+  } catch (err) {
+    console.error("search-multi error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 /**
  * Endpoint: keyword search
