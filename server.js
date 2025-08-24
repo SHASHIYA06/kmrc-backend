@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import OpenAI from "openai";
-import fetch from "node-fetch";
 import multer from "multer";
 import fs from "fs";
 import Tesseract from "tesseract.js";
@@ -25,10 +24,9 @@ app.post("/summarize-file", upload.single("file"), async (req, res) => {
     let fileText = "";
     const file = req.file;
 
-    // OCR for scan.pdf only
     if (file && file.mimetype === "application/pdf") {
       fileText = await processOCR(file.path);
-      fs.unlinkSync(file.path); // delete temp file after OCR
+      fs.unlinkSync(file.path);
     } else if (file) {
       fileText = fs.readFileSync(file.path, "utf8");
       fs.unlinkSync(file.path);
@@ -62,35 +60,83 @@ app.post("/summarize-file", upload.single("file"), async (req, res) => {
   }
 });
 
-// Circuit diagram generation stub (could call a drawing library/API)
-app.post("/circuit-diagram", async (req, res) => {
+// New endpoint: summarize multiple files based on query + file contents
+app.post("/summarize-multi", async (req, res) => {
   try {
-    const { wire_number } = req.body;
-    // Here you could add logic to lookup wire details and generate a diagram.
+    const { query, files } = req.body;
+    if (!query || !files || !Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ error: "Missing or invalid query/files in request." });
+    }
+
+    // Combine file contents into one prompt
+    let prompt = `User query: ${query}\n\nFiles content details (combine info for full context):\n`;
+    files.forEach((file, i) => {
+      prompt += `\n--- File ${i + 1} (${file.name}):\n${file.text}\n`;
+    });
+
+    const openai = new OpenAI({
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: process.env.OPENROUTER_API_KEY,
+    });
+
+    const completion = await openai.chat.completions.create({
+      model: "deepseek/deepseek-chat-v3-0324:free",
+      messages: [
+        { role: "system", content: "You are an expert Metro assistant AI. Answer the query with maximum relevant details based on the combined files provided." },
+        { role: "user", content: prompt }
+      ],
+    });
+
+    res.json({ result: completion.choices[0].message.content });
+  } catch (e) {
+    console.error("summarize-multi error:", e);
+    res.status(500).json({ error: "Multi-file AI summary failed." });
+  }
+});
+
+// New endpoint: architecture & circuit detail extraction with example diagram URL
+app.post("/circuit-arch", async (req, res) => {
+  try {
+    const { query, files } = req.body;
+    if (!query || !files || !Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ error: "Missing or invalid query/files in request." });
+    }
+
+    // Build prompt similarly combining relevant data
+    let prompt = `User request: ${query}\n\nAnalyze files for architecture, circuits, wires info:\n`;
+    files.forEach((file, i) => {
+      prompt += `\n--- File ${i + 1} (${file.name}):\n${file.text}\n`;
+    });
+
+    const openai = new OpenAI({
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: process.env.OPENROUTER_API_KEY,
+    });
+
+    const completion = await openai.chat.completions.create({
+      model: "deepseek/deepseek-chat-v3-0324:free",
+      messages: [
+        { role: "system", content: "You are a Metro technical AI helping with architecture & circuit diagrams. Summarize all details and if possible provide a structured diagram URL." },
+        { role: "user", content: prompt }
+      ],
+    });
+
+    // For demonstration, sending a static diagram URL — replace with your generated diagram logic if any
+    const diagram_url = "https://your-app.com/static/sample-architecture.png";
+
     res.json({ 
-      wire: wire_number, 
-      details: `Full details for wire ${wire_number} goes here.`,
-      diagram_url: "https://your_app.com/static/diagrams/example.png"
+      result: completion.choices[0].message.content,
+      diagram_url
     });
   } catch (e) {
-    res.status(500).json({ error: "Diagram creation failed." });
+    console.error("circuit-arch error:", e);
+    res.status(500).json({ error: "Circuit architecture AI extraction failed." });
   }
 });
 
-// Export summary endpoint (returns plain text for download)
-app.post("/export-summary", async (req, res) => {
-  try {
-    const { summary } = req.body;
-    res.header("Content-Type", "text/plain");
-    res.send(summary || "No summary!");
-  } catch (e) {
-    res.status(500).send("Export error.");
-  }
-});
-
-// Health check
+// Health check route
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", backend: "KMRC Metro AI Doc App" });
+  res.json({ status: "ok", backend: "KMRC Metro AI Multi-file Backend" });
 });
 
 const PORT = process.env.PORT || 5000;
