@@ -2,141 +2,79 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import OpenAI from "openai";
-import multer from "multer";
-import fs from "fs";
-import Tesseract from "tesseract.js";
 
 dotenv.config();
 
 const app = express();
 app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
 app.use(express.json());
-const upload = multer({ dest: "uploads/" });
 
-function processOCR(filePath) {
-  return Tesseract.recognize(filePath, "eng", { logger: m => console.log(m) })
-    .then(({ data: { text } }) => text)
-    .catch(() => "");
-}
-
-app.post("/summarize-file", upload.single("file"), async (req, res) => {
-  try {
-    let fileText = "";
-    const file = req.file;
-
-    if (file && file.mimetype === "application/pdf") {
-      fileText = await processOCR(file.path);
-      fs.unlinkSync(file.path);
-    } else if (file) {
-      fileText = fs.readFileSync(file.path, "utf8");
-      fs.unlinkSync(file.path);
-    } else {
-      fileText = req.body.text || "";
-    }
-    const { query } = req.body;
-    const prompt = `User question: ${query}\n\nFile Content:\n${fileText}`;
-
-    const openai = new OpenAI({
-      baseURL: "https://openrouter.ai/api/v1",
-      apiKey: process.env.OPENROUTER_API_KEY,
-      defaultHeaders: {
-        "HTTP-Referer": process.env.FRONTEND_URL,
-        "X-Title": "KMRC Summarizer Backend"
-      },
-    });
-
-    const completion = await openai.chat.completions.create({
-      model: "deepseek/deepseek-chat-v3-0324:free",
-      messages: [
-        { role: "system", content: "You are a helpful assistant for Metro projects. Respond with deep details, extract all circuit, wire, and architecture info." },
-        { role: "user", content: prompt }
-      ],
-    });
-
-    res.json({ summary: completion.choices[0].message.content });
-  } catch (error) {
-    console.error("Summarize-file error:", error);
-    res.status(500).json({ error: "Failed to process file or request." });
-  }
+const openai = new OpenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
 });
 
-// New endpoint: summarize multiple files based on query + file contents
+// Multi-file summarize (adapted for Gemini API)
 app.post("/summarize-multi", async (req, res) => {
   try {
     const { query, files } = req.body;
     if (!query || !files || !Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ error: "Missing or invalid query/files in request." });
+      return res.status(400).json({ error: "Missing query or files" });
     }
 
-    // Combine file contents into one prompt
-    let prompt = `User query: ${query}\n\nFiles content details (combine info for full context):\n`;
+    let prompt = `User query: ${query}\n\nFiles:\n`;
     files.forEach((file, i) => {
-      prompt += `\n--- File ${i + 1} (${file.name}):\n${file.text}\n`;
-    });
-
-    const openai = new OpenAI({
-      baseURL: "https://openrouter.ai/api/v1",
-      apiKey: process.env.OPENROUTER_API_KEY,
+      prompt += `---\nFile ${i + 1} (${file.name}):\n${file.text}\n`;
     });
 
     const completion = await openai.chat.completions.create({
-      model: "deepseek/deepseek-chat-v3-0324:free",
+      model: "gemini-2.0-flash",
       messages: [
-        { role: "system", content: "You are an expert Metro assistant AI. Answer the query with maximum relevant details based on the combined files provided." },
+        { role: "system", content: "You are an expert Metro AI assistant. Use provided files to answer the query in detail."},
         { role: "user", content: prompt }
       ],
     });
 
     res.json({ result: completion.choices[0].message.content });
-  } catch (e) {
-    console.error("summarize-multi error:", e);
-    res.status(500).json({ error: "Multi-file AI summary failed." });
+  } catch(error) {
+    console.error("summarize-multi error:", error);
+    res.status(500).json({ error: "Failed Gemini summarize-multi" });
   }
 });
 
-// New endpoint: architecture & circuit detail extraction with example diagram URL
+// Architecture & circuit search endpoint
 app.post("/circuit-arch", async (req, res) => {
   try {
     const { query, files } = req.body;
     if (!query || !files || !Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ error: "Missing or invalid query/files in request." });
+      return res.status(400).json({ error: "Missing query or files" });
     }
 
-    // Build prompt similarly combining relevant data
-    let prompt = `User request: ${query}\n\nAnalyze files for architecture, circuits, wires info:\n`;
+    let prompt = `User request: ${query}\nAnalyze the following files for architecture, circuits, and wire details:\n`;
     files.forEach((file, i) => {
-      prompt += `\n--- File ${i + 1} (${file.name}):\n${file.text}\n`;
-    });
-
-    const openai = new OpenAI({
-      baseURL: "https://openrouter.ai/api/v1",
-      apiKey: process.env.OPENROUTER_API_KEY,
+      prompt += `---\nFile ${i + 1} (${file.name}):\n${file.text}\n`;
     });
 
     const completion = await openai.chat.completions.create({
-      model: "deepseek/deepseek-chat-v3-0324:free",
+      model: "gemini-2.0-flash",
       messages: [
-        { role: "system", content: "You are a Metro technical AI helping with architecture & circuit diagrams. Summarize all details and if possible provide a structured diagram URL." },
+        { role: "system", content: "You are a Metro architecture AI assistant. Provide detailed architecture and circuit info." },
         { role: "user", content: prompt }
       ],
     });
 
-    // For demonstration, sending a static diagram URL — replace with your generated diagram logic if any
-    const diagram_url = "https://your-app.com/static/sample-architecture.png";
+    // Example static diagram URL (replace with your diagram logic)
+    const diagram_url = "https://yourapp.com/static/sample-architecture.png";
 
-    res.json({ 
-      result: completion.choices[0].message.content,
-      diagram_url
-    });
-  } catch (e) {
-    console.error("circuit-arch error:", e);
-    res.status(500).json({ error: "Circuit architecture AI extraction failed." });
+    res.json({ result: completion.choices[0].message.content, diagram_url });
+  } catch(error) {
+    console.error("circuit-arch error:", error);
+    res.status(500).json({ error: "Failed Gemini circuit-arch" });
   }
 });
 
-// Health check route
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", backend: "KMRC Metro AI Multi-file Backend" });
+  res.json({ status: "ok", backend: "KMRC Gemini API Backend" });
 });
 
 const PORT = process.env.PORT || 5000;
