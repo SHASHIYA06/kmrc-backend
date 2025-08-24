@@ -82,35 +82,26 @@ async function extractTextFromFile(filePath, mimetype) {
 }
 
 // ---- Multi-file Summarization ----
-app.post("/summarize-multi", upload.array("files"), async (req, res) => {
+app.post("/summarize-multi", async (req, res) => {
   try {
-    const { query } = req.body;
-    const files = req.files;
-
+    const { query, files } = req.body;
     if (!query || !files?.length) {
       return res.status(400).json({ error: "Missing query or files" });
     }
 
-    let prompt = `User query: ${query}\n\nExtracted file data:\n`;
-
-    for (const file of files) {
-      try {
-        const text = await extractTextFromFile(file.path, file.mimetype);
-        prompt += `---\nFile: ${file.originalname}\n${text}\n`;
-      } catch (err) {
-        prompt += `---\nFile: ${file.originalname}\n[Error extracting: ${err.message}]\n`;
-      }
-    }
+    let prompt = `User query: ${query}\n\nFiles:\n`;
+    files.forEach((file, i) => {
+      prompt += `---\nFile ${i + 1} (${file.name}):\n${file.text}\n`;
+    });
 
     const result = await callGemini(prompt);
     res.json({ result });
-
-    files.forEach(f => fs.unlinkSync(f.path));
   } catch (error) {
     console.error("summarize-multi error:", error);
     res.status(500).json({ error: error.message });
   }
 });
+
 
 // ---- Multi-file Search with JSON Output ----
 app.post("/search-multi", upload.array("files"), async (req, res) => {
