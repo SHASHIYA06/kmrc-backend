@@ -15,17 +15,20 @@ app.use(express.json());
 async function callGemini(prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
-  const body = { contents: [{ parts: [{ text: prompt }] }] };
+  console.log("🔎 Sending prompt to Gemini, length:", prompt.length);
 
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }]
+    })
   });
 
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`Gemini API Error: ${res.status} ${errorText}`);
+    console.error("❌ Gemini API Error:", errorText);
+    throw new Error(`Gemini API Error: ${res.status}`);
   }
 
   const data = await res.json();
@@ -34,13 +37,14 @@ async function callGemini(prompt) {
 
 // ---- File Text Extraction ----
 async function extractTextFromFile(filePath, mimetype) {
+  console.log(`📂 Extracting from ${filePath} (${mimetype})`);
+
   if (mimetype === "application/pdf") {
     const dataBuffer = fs.readFileSync(filePath);
     const pdfData = await pdf(dataBuffer);
 
-    // if text empty → fallback to OCR
     if (!pdfData.text.trim()) {
-      console.log("PDF seems scanned, using OCR...");
+      console.log("🟡 Empty PDF text, using OCR...");
       const { data: { text } } = await Tesseract.recognize(filePath, "eng");
       return text;
     }
@@ -65,7 +69,7 @@ async function extractTextFromFile(filePath, mimetype) {
   throw new Error(`Unsupported file type: ${mimetype}`);
 }
 
-// ---- API Route ----
+// ---- Multi-file Summarization ----
 app.post("/summarize-multi", upload.array("files"), async (req, res) => {
   try {
     const { query } = req.body;
@@ -89,7 +93,6 @@ app.post("/summarize-multi", upload.array("files"), async (req, res) => {
     const result = await callGemini(prompt);
     res.json({ result });
 
-    // cleanup
     files.forEach(f => fs.unlinkSync(f.path));
   } catch (error) {
     console.error("summarize-multi error:", error);
@@ -97,5 +100,79 @@ app.post("/summarize-multi", upload.array("files"), async (req, res) => {
   }
 });
 
+// ---- Multi-file Search with JSON Output ----
+app.post("/search-multi", upload.array("files"), async (req, res) => {
+  try {
+    const { keyword } = req.body;
+    const files = req.files;
+
+    if (!keyword || !files?.length) {
+      return res.status(400).json({ error: "Missing keyword or files" });
+    }
+
+    let extractedSections = [];
+
+    for (const file of files) {
+      try {
+        const text = await extractTextFromFile(file.path, file.mimetype);
+
+        // find only lines containing the keyword
+        const relevant = text
+          .split("\n")
+          .filter(line => line.toLowerCase().includes(keyword.toLowerCase()))
+          .join("\n");
+
+        if (relevant.trim()) {
+          extractedSections.push({
+            file: file.originalname,
+            matches: relevant
+          });
+        }
+      } catch (err) {
+        extractedSections.push({
+          file: file.originalname,
+          error: err.message
+        });
+      }
+    }
+
+    const structuredPrompt = `
+You are a technical assistant. The user is searching for '${keyword}' across multiple engineering documents.
+
+Here are extracted relevant sections:
+${JSON.stringify(extractedSections, null, 2)}
+
+Please return structured JSON with the following format:
+{
+  "keyword": "${keyword}",
+  "files": [
+    {
+      "file": "filename",
+      "details": [
+        {
+          "system": "system name (if found)",
+          "subsystem": "subsystem details (if found)",
+          "diagram": "diagram description or explanation (if found)",
+          "trace": "step by step tracing information if applicable"
+        }
+      ]
+    }
+  ]
+}
+`;
+
+    const result = await callGemini(structuredPrompt);
+
+    res.json({ result, extractedSections });
+
+    files.forEach(f => fs.unlinkSync(f.path));
+  } catch (error) {
+    console.error("search-multi error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ---- Start ----
-app.listen(3000, () => console.log("🚀 Server running on http://localhost:3000"));
+app.listen(3000, () =>
+  console.log("🚀 Server running at http://localhost:3000")
+);
