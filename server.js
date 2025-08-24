@@ -1,27 +1,21 @@
 import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
+import multer from "multer";
+import fs from "fs";
+import pdf from "pdf-parse";
+import Tesseract from "tesseract.js";
 import fetch from "node-fetch";
-
-dotenv.config();
+import mammoth from "mammoth";
 
 const app = express();
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
-app.use(express.json({ limit: "25mb" })); // allow big payloads
+const upload = multer({ dest: "uploads/" });
 
-// ---------- Gemini REST helper ----------
-async function callGemini(prompt, systemInstruction = "You are a helpful assistant.") {
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+app.use(express.json());
 
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: `${systemInstruction}\n\n${prompt}` }]
-      }
-    ]
-  };
+// ---- Gemini API Call ----
+async function callGemini(prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+  const body = { contents: [{ parts: [{ text: prompt }] }] };
 
   const res = await fetch(url, {
     method: "POST",
@@ -30,164 +24,78 @@ async function callGemini(prompt, systemInstruction = "You are a helpful assista
   });
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Gemini API ${res.status}: ${text}`);
+    const errorText = await res.text();
+    throw new Error(`Gemini API Error: ${res.status} ${errorText}`);
   }
 
   const data = await res.json();
   return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
 }
 
-// ---------- RAG utilities (simple & fast) ----------
-function normalize(s) {
-  return (s || "")
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+// ---- File Text Extraction ----
+async function extractTextFromFile(filePath, mimetype) {
+  if (mimetype === "application/pdf") {
+    const dataBuffer = fs.readFileSync(filePath);
+    const pdfData = await pdf(dataBuffer);
 
-function chunkText(text, size = 1800, overlap = 200) {
-  const clean = normalize(text);
-  if (!clean) return [];
-  let chunks = [];
-  for (let i = 0; i < clean.length; i += size - overlap) {
-    chunks.push(clean.slice(i, i + size));
+    // if text empty → fallback to OCR
+    if (!pdfData.text.trim()) {
+      console.log("PDF seems scanned, using OCR...");
+      const { data: { text } } = await Tesseract.recognize(filePath, "eng");
+      return text;
+    }
+    return pdfData.text;
   }
-  return chunks;
-}
 
-function scoreChunk(query, chunk) {
-  // Very small, effective keyword scorer
-  const q = normalize(query).toLowerCase();
-  const terms = q.split(/\s+/).filter(Boolean);
-  const c = chunk.toLowerCase();
-  let score = 0;
-  for (const t of terms) {
-    if (t.length < 2) continue;
-    const matches = c.split(t).length - 1;
-    score += matches * (t.length >= 5 ? 3 : 1);
+  if (mimetype.includes("image")) {
+    const { data: { text } } = await Tesseract.recognize(filePath, "eng");
+    return text;
   }
-  // Favor denser chunks
-  score += Math.min(chunk.length / 500, 5);
-  return score;
-}
 
-function selectTopChunks(query, files, maxChars = 20000) {
-  // files: [{name, text}]
-  let all = [];
-  for (const f of files) {
-    const chunks = chunkText(f.text);
-    chunks.forEach((ch, idx) => {
-      all.push({
-        file: f.name || "unknown",
-        idx,
-        text: ch,
-        score: scoreChunk(query, ch)
-      });
-    });
+  if (mimetype.includes("word") || mimetype.includes("officedocument")) {
+    const buffer = fs.readFileSync(filePath);
+    const result = await mammoth.extractRawText({ buffer });
+    return result.value;
   }
-  all.sort((a, b) => b.score - a.score);
 
-  let picked = [];
-  let total = 0;
-  for (const item of all) {
-    if (total + item.text.length > maxChars) break;
-    picked.push(item);
-    total += item.text.length;
-    if (picked.length >= 50) break; // guardrail
+  if (mimetype.includes("text")) {
+    return fs.readFileSync(filePath, "utf-8");
   }
-  return picked;
+
+  throw new Error(`Unsupported file type: ${mimetype}`);
 }
 
-function buildPrompt(query, files) {
-  const top = selectTopChunks(query, files);
-  const context = top
-    .map(
-      (t) =>
-        `<<<FILE:${t.file} | CHUNK:${t.idx}>>>\n${t.text}\n<<<END>>>`
-    )
-    .join("\n");
-
-  return `
-[INSTRUCTIONS FOR MODEL]
-- You have access to extracted document text from multiple files (including OCR from scanned PDFs).
-- Answer the user’s query with precise, step-by-step reasoning.
-- Cite the file name and chunk IDs when relevant (e.g., "DMC CAB.pdf §chunk 3").
-- If the query implies architectures, circuits, wiring or system flows, include a Mermaid diagram in a fenced code block like:
-\`\`\`mermaid
-flowchart TD
-  A[Source] --> B[Processor]
-  B --> C[Output]
-\`\`\`
-- If the user asks to trace wires or end-to-end flow, produce an ordered checklist and cross-reference where evidence appears.
-- If information is missing, say so, and suggest where to find it in the document tree.
-
-[USER QUERY]
-${query}
-
-[DOCUMENT CONTEXT - TOP MATCHED CHUNKS]
-${context}
-`.trim();
-}
-
-// ---------- Endpoints ----------
-app.post("/summarize-multi", async (req, res) => {
+// ---- API Route ----
+app.post("/summarize-multi", upload.array("files"), async (req, res) => {
   try {
-    const { query, files } = req.body;
+    const { query } = req.body;
+    const files = req.files;
+
     if (!query || !files?.length) {
       return res.status(400).json({ error: "Missing query or files" });
     }
 
-    // files are expected like: [{name, text}]
-    const cleanFiles = files
-      .filter(f => f?.text)
-      .map(f => ({ name: f.name || "unknown", text: normalize(f.text) }));
+    let prompt = `User query: ${query}\n\nExtracted file data:\n`;
 
-    if (!cleanFiles.length) {
-      return res.status(400).json({ error: "No usable text extracted from files." });
+    for (const file of files) {
+      try {
+        const text = await extractTextFromFile(file.path, file.mimetype);
+        prompt += `---\nFile: ${file.originalname}\n${text}\n`;
+      } catch (err) {
+        prompt += `---\nFile: ${file.originalname}\n[Error extracting: ${err.message}]\n`;
+      }
     }
 
-    const prompt = buildPrompt(query, cleanFiles);
-    const result = await callGemini(prompt, "You are KMRC Metro Document Intelligence Assistant.");
+    const result = await callGemini(prompt);
     res.json({ result });
-  } catch (err) {
-    console.error("summarize-multi error:", err);
-    res.status(500).json({ error: err.message || "AI summarize failed." });
+
+    // cleanup
+    files.forEach(f => fs.unlinkSync(f.path));
+  } catch (error) {
+    console.error("summarize-multi error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.post("/circuit-arch", async (req, res) => {
-  try {
-    const { query, files } = req.body;
-    if (!query || !files?.length) {
-      return res.status(400).json({ error: "Missing query or files" });
-    }
-
-    const cleanFiles = files
-      .filter(f => f?.text)
-      .map(f => ({ name: f.name || "unknown", text: normalize(f.text) }));
-
-    const archQuery =
-      `${query}\n\nFocus on: architecture, circuits, wiring, signals, terminals, connectors, cable tags, panel I/O, and tracing from source to destination.`;
-
-    const prompt = buildPrompt(archQuery, cleanFiles);
-    const result = await callGemini(
-      prompt,
-      "You are a Metro architecture & circuits specialist. Explain step-by-step and include Mermaid when helpful."
-    );
-
-    // optional static diagram hook (keep for compatibility)
-    const diagram_url = null;
-    res.json({ result, diagram_url });
-  } catch (err) {
-    console.error("circuit-arch error:", err);
-    res.status(500).json({ error: err.message || "Failed Gemini circuit-arch" });
-  }
-});
-
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", backend: "KMRC Gemini API Backend" });
-});
-
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+// ---- Start ----
+app.listen(3000, () => console.log("🚀 Server running on http://localhost:3000"));
