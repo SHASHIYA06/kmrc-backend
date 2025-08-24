@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import OpenAI from "openai";
+import fetch from "node-fetch";
 
 dotenv.config();
 
@@ -9,16 +9,38 @@ const app = express();
 app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
 app.use(express.json());
 
-const openai = new OpenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
-});
+// Gemini API helper
+async function callGemini(prompt, systemInstruction = "You are an AI assistant.") {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
-// Multi-file summarize (adapted for Gemini API)
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: `${systemInstruction}\n\n${prompt}` }]
+      }
+    ]
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Gemini API failed: ${res.statusText}`);
+  }
+
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response from Gemini.";
+}
+
+// Multi-file summarize
 app.post("/summarize-multi", async (req, res) => {
   try {
     const { query, files } = req.body;
-    if (!query || !files || !Array.isArray(files) || files.length === 0) {
+    if (!query || !files?.length) {
       return res.status(400).json({ error: "Missing query or files" });
     }
 
@@ -28,26 +50,19 @@ app.post("/summarize-multi", async (req, res) => {
       prompt += `---\nFile ${i + 1} (${file.name}):\n${safeText}\n`;
     });
 
-    const completion = await openai.chat.completions.create({
-      model: "gemini-2.0-flash",
-      messages: [
-        { role: "system", content: "You are a Metro AI assistant..." },
-        { role: "user", content: prompt }
-      ],
-    });
-
-    res.json({ result: completion.choices[0].message.content });
+    const result = await callGemini(prompt, "You are a Metro AI assistant.");
+    res.json({ result });
   } catch (error) {
     console.error("Error in summarize-multi:", error);
     res.status(500).json({ error: "AI summarize failed." });
   }
 });
 
-// Architecture & circuit search endpoint
+// Architecture & circuit search
 app.post("/circuit-arch", async (req, res) => {
   try {
     const { query, files } = req.body;
-    if (!query || !files || !Array.isArray(files) || files.length === 0) {
+    if (!query || !files?.length) {
       return res.status(400).json({ error: "Missing query or files" });
     }
 
@@ -56,19 +71,11 @@ app.post("/circuit-arch", async (req, res) => {
       prompt += `---\nFile ${i + 1} (${file.name}):\n${file.text}\n`;
     });
 
-    const completion = await openai.chat.completions.create({
-      model: "gemini-2.0-flash",
-      messages: [
-        { role: "system", content: "You are a Metro architecture AI assistant. Provide detailed architecture and circuit info." },
-        { role: "user", content: prompt }
-      ],
-    });
+    const result = await callGemini(prompt, "You are a Metro architecture AI assistant. Provide detailed architecture and circuit info.");
+    const diagram_url = "https://yourapp.com/static/sample-architecture.png"; // Replace with real diagram logic
 
-    // Example static diagram URL (replace with your diagram logic)
-    const diagram_url = "https://yourapp.com/static/sample-architecture.png";
-
-    res.json({ result: completion.choices[0].message.content, diagram_url });
-  } catch(error) {
+    res.json({ result, diagram_url });
+  } catch (error) {
     console.error("circuit-arch error:", error);
     res.status(500).json({ error: "Failed Gemini circuit-arch" });
   }
