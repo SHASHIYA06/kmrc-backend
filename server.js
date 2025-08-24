@@ -10,14 +10,15 @@ app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
 app.use(express.json());
 
 // Gemini API helper
-async function callGemini(prompt, systemInstruction = "You are an AI assistant.") {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+import fetch from "node-fetch";
+
+async function callGemini(prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   const body = {
     contents: [
       {
-        role: "user",
-        parts: [{ text: `${systemInstruction}\n\n${prompt}` }]
+        parts: [{ text: prompt }]
       }
     ]
   };
@@ -25,12 +26,18 @@ async function callGemini(prompt, systemInstruction = "You are an AI assistant."
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(body)
   });
 
   if (!res.ok) {
-    throw new Error(`Gemini API failed: ${res.statusText}`);
+    const errorText = await res.text();
+    throw new Error(`Gemini API Error: ${res.status} ${errorText}`);
   }
+
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
+}
+
 
   const data = await res.json();
   return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response from Gemini.";
