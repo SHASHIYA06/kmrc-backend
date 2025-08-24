@@ -24,21 +24,22 @@ app.post("/summarize-multi", async (req, res) => {
 
     let prompt = `User query: ${query}\n\nFiles:\n`;
     files.forEach((file, i) => {
-      prompt += `---\nFile ${i + 1} (${file.name}):\n${file.text}\n`;
+      const safeText = (file.text || "").replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
+      prompt += `---\nFile ${i + 1} (${file.name}):\n${safeText}\n`;
     });
 
     const completion = await openai.chat.completions.create({
       model: "gemini-2.0-flash",
       messages: [
-        { role: "system", content: "You are an expert Metro AI assistant. Use provided files to answer the query in detail."},
+        { role: "system", content: "You are a Metro AI assistant..." },
         { role: "user", content: prompt }
       ],
     });
 
     res.json({ result: completion.choices[0].message.content });
-  } catch(error) {
-    console.error("summarize-multi error:", error);
-    res.status(500).json({ error: "Failed Gemini summarize-multi" });
+  } catch (error) {
+    console.error("Error in summarize-multi:", error);
+    res.status(500).json({ error: "AI summarize failed." });
   }
 });
 
