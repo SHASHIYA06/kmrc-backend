@@ -5,11 +5,23 @@ import pdf from "pdf-parse";
 import Tesseract from "tesseract.js";
 import fetch from "node-fetch";
 import mammoth from "mammoth";
+import cors from "cors";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 const upload = multer({ dest: "uploads/" });
 
+// ✅ Enable CORS for your frontend
+app.use(cors({
+  origin: process.env.FRONTEND_URL,
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"],
+}));
+
 app.use(express.json());
+
 
 // ---- Gemini API Call ----
 async function callGemini(prompt) {
