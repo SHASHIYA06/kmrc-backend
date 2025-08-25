@@ -14,7 +14,7 @@ const app = express();
 const upload = multer({ dest: "uploads/" });
 
 app.use(cors({
-  origin: process.env.FRONTEND_URL,
+  origin: process.env.FRONTEND_URL || "*",
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"]
 }));
@@ -25,24 +25,29 @@ app.use(express.json());
  * Extract text from PDF/Images/DOCX
  */
 async function extractText(filePath, mimetype) {
-  if (mimetype === "application/pdf") {
-    const data = await pdf(fs.readFileSync(filePath));
-    if (data.text.trim()) return data.text;
+  try {
+    if (mimetype === "application/pdf") {
+      const data = await pdf(fs.readFileSync(filePath));
+      if (data.text.trim()) return data.text;
 
-    // fallback OCR if scanned
-    return (await Tesseract.recognize(filePath, "eng")).data.text;
+      // fallback OCR if scanned
+      return (await Tesseract.recognize(filePath, "eng")).data.text;
+    }
+
+    if (mimetype.startsWith("image/")) {
+      return (await Tesseract.recognize(filePath, "eng")).data.text;
+    }
+
+    if (mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+      const result = await mammoth.extractRawText({ path: filePath });
+      return result.value;
+    }
+
+    return "";
+  } catch (err) {
+    console.error("❌ extractText error:", err);
+    return "";
   }
-
-  if (mimetype.startsWith("image/")) {
-    return (await Tesseract.recognize(filePath, "eng")).data.text;
-  }
-
-  if (mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
-    const result = await mammoth.extractRawText({ path: filePath });
-    return result.value;
-  }
-
-  return "";
 }
 
 /**
@@ -69,13 +74,12 @@ async function callGemini(prompt) {
   if (!res.ok) throw new Error(`Gemini API Error: ${res.status} ${text}`);
 
   const data = JSON.parse(text);
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response from Gemini.";
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "⚠️ No response from Gemini.";
 }
 
 /**
- * Endpoint: summarize across multiple files
+ * Endpoint: summarize across multiple files (Drive JSON mode)
  */
-// --- modify summarize-multi ---
 app.post("/summarize-multi", async (req, res) => {
   try {
     const { query, files } = req.body;
@@ -83,66 +87,66 @@ app.post("/summarize-multi", async (req, res) => {
       return res.status(400).json({ error: "Missing query or files" });
     }
 
-    let prompt = `User query: ${query}\n\nExtracted file contents:\n`;
-    for (const f of files) {
-      prompt += `\n--- File: ${f.name} (${f.meta}) ---\n${f.text}\n`;
-    }
+    // Build prompt with structured context
+    let prompt = `📄 User query: ${query}\n\nHere are the provided files with extracted contents:\n\n`;
+    files.forEach((f, i) => {
+      prompt += `#${i + 1} File: ${f.name}\nSystem: ${f.system || "N/A"} | Subsystem: ${f.subsystem || "N/A"} | Meta: ${f.meta || ""}\n---\n${f.text?.substring(0, 800)}...\n\n`;
+    });
 
     const result = await callGemini(prompt);
     res.json({ result });
   } catch (err) {
-    console.error("summarize-multi error:", err);
+    console.error("❌ summarize-multi error:", err);
     res.status(500).json({ error: err.message });
   }
 });
-
-// --- NEW: keyword search across OCRText ---
-app.post("/search-multi", async (req, res) => {
-  try {
-    const { keyword, files } = req.body;
-    if (!keyword || !files?.length) {
-      return res.status(400).json({ error: "Missing keyword or files" });
-    }
-
-    let matches = [];
-    for (const f of files) {
-      if (f.text.toLowerCase().includes(keyword.toLowerCase())) {
-        matches.push({
-          file: f.name,
-          excerpt: f.text.substring(0, 500) + "..."
-        });
-      }
-    }
-
-    let response = "Matches:\n";
-    matches.forEach(m => {
-      response += `\nFile: ${m.file}\nExcerpt: ${m.excerpt}\n`;
-    });
-
-    const result = await callGemini(
-      `The user searched for keyword: "${keyword}". Here are the matches:\n${response}\n\nSummarize and explain findings clearly.`
-    );
-
-    res.json({ result, matches });
-  } catch (err) {
-    console.error("search-multi error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 
 /**
- * Endpoint: keyword search
+ * Endpoint: keyword search (supports both JSON + file upload modes)
  */
 app.post("/search-multi", upload.array("files"), async (req, res) => {
   try {
-    const { keyword } = req.body;
+    let keyword, files;
+
+    // Case 1: JSON mode (from Drive metadata + OCR text)
+    if (req.is("application/json")) {
+      keyword = req.body.keyword;
+      files = req.body.files;
+      if (!keyword || !files?.length) {
+        return res.status(400).json({ error: "Missing keyword or files" });
+      }
+
+      let matches = [];
+      for (const f of files) {
+        if (f.text?.toLowerCase().includes(keyword.toLowerCase())) {
+          matches.push({
+            file: f.name,
+            system: f.system || "",
+            subsystem: f.subsystem || "",
+            excerpt: f.text.substring(0, 500) + "..."
+          });
+        }
+      }
+
+      // Build structured table for AI
+      const table = matches.map(m =>
+        `${m.file} | ${m.system} | ${m.subsystem} | ${m.excerpt}`
+      ).join("\n");
+
+      const result = await callGemini(
+        `The user searched for keyword: "${keyword}". Here are the matches (in tabular form):\n${table}\n\nAnswer the query strictly based on this data.`
+      );
+
+      return res.json({ result, matches });
+    }
+
+    // Case 2: File upload mode
+    keyword = req.body.keyword;
     if (!keyword || !req.files?.length) {
-      return res.status(400).json({ error: "Missing keyword or files" });
+      return res.status(400).json({ error: "Missing keyword or uploaded files" });
     }
 
     let matches = [];
-
     for (const file of req.files) {
       const text = await extractText(file.path, file.mimetype);
       fs.unlinkSync(file.path);
@@ -161,12 +165,12 @@ app.post("/search-multi", upload.array("files"), async (req, res) => {
     });
 
     const result = await callGemini(
-      `The user searched for keyword: ${keyword}. Here are raw matches:\n${response}\n\nSummarize and explain findings clearly.`
+      `The user searched for keyword: "${keyword}". Here are raw matches:\n${response}\n\nSummarize and explain findings clearly.`
     );
 
     res.json({ result, matches });
   } catch (err) {
-    console.error("search-multi error:", err);
+    console.error("❌ search-multi error:", err);
     res.status(500).json({ error: err.message });
   }
 });
