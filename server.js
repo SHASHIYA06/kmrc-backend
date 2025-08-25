@@ -30,8 +30,7 @@ async function extractText(filePath, mimetype) {
       const data = await pdf(fs.readFileSync(filePath));
       if (data.text.trim()) return data.text;
 
-      // fallback OCR if scanned
-      return (await Tesseract.recognize(filePath, "eng")).data.text;
+      return (await Tesseract.recognize(filePath, "eng")).data.text; // OCR fallback
     }
 
     if (mimetype.startsWith("image/")) {
@@ -57,11 +56,7 @@ async function callGemini(prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   const body = {
-    contents: [
-      {
-        parts: [{ text: prompt }]
-      }
-    ]
+    contents: [{ parts: [{ text: prompt }]}]
   };
 
   const res = await fetch(url, {
@@ -78,7 +73,18 @@ async function callGemini(prompt) {
 }
 
 /**
- * Endpoint: summarize across multiple files (Drive JSON mode)
+ * Split large text into chunks for Gemini
+ */
+function chunkText(text, chunkSize = 4000) {
+  let chunks = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    chunks.push(text.substring(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+/**
+ * Deep AI Search: summarize-multi with chunking
  */
 app.post("/summarize-multi", async (req, res) => {
   try {
@@ -87,14 +93,34 @@ app.post("/summarize-multi", async (req, res) => {
       return res.status(400).json({ error: "Missing query or files" });
     }
 
-    // Build prompt with structured context
-    let prompt = `📄 User query: ${query}\n\nHere are the provided files with extracted contents:\n\n`;
-    files.forEach((f, i) => {
-      prompt += `#${i + 1} File: ${f.name}\nSystem: ${f.system || "N/A"} | Subsystem: ${f.subsystem || "N/A"} | Meta: ${f.meta || ""}\n---\n${f.text?.substring(0, 800)}...\n\n`;
-    });
+    let allSummaries = [];
 
-    const result = await callGemini(prompt);
-    res.json({ result });
+    for (const f of files) {
+      if (!f.text) continue;
+
+      const chunks = chunkText(f.text, 4000);
+      let summaries = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunkPrompt = `User query: "${query}"\n\nFile: ${f.name}\nSystem: ${f.system || "N/A"}\nSubsystem: ${f.subsystem || "N/A"}\n\nContent chunk ${i+1}/${chunks.length}:\n${chunks[i]}\n\nAnswer based ONLY on this chunk.`;
+        const chunkResult = await callGemini(chunkPrompt);
+        summaries.push(chunkResult);
+      }
+
+      // Merge summaries into one per file
+      const merged = await callGemini(
+        `User query: "${query}". Combine these partial summaries into one detailed, structured answer:\n\n${summaries.join("\n\n")}`
+      );
+
+      allSummaries.push(`📄 File: ${f.name}\n${merged}`);
+    }
+
+    // Final answer across all files
+    const finalAnswer = await callGemini(
+      `User query: "${query}". Combine and refine the following file-level summaries into one comprehensive report:\n\n${allSummaries.join("\n\n")}`
+    );
+
+    res.json({ result: finalAnswer, details: allSummaries });
   } catch (err) {
     console.error("❌ summarize-multi error:", err);
     res.status(500).json({ error: err.message });
@@ -102,13 +128,12 @@ app.post("/summarize-multi", async (req, res) => {
 });
 
 /**
- * Endpoint: keyword search (supports both JSON + file upload modes)
+ * Keyword Search with Chunking (micro-level search)
  */
 app.post("/search-multi", upload.array("files"), async (req, res) => {
   try {
     let keyword, files;
 
-    // Case 1: JSON mode (from Drive metadata + OCR text)
     if (req.is("application/json")) {
       keyword = req.body.keyword;
       files = req.body.files;
@@ -118,29 +143,31 @@ app.post("/search-multi", upload.array("files"), async (req, res) => {
 
       let matches = [];
       for (const f of files) {
-        if (f.text?.toLowerCase().includes(keyword.toLowerCase())) {
-          matches.push({
-            file: f.name,
-            system: f.system || "",
-            subsystem: f.subsystem || "",
-            excerpt: f.text.substring(0, 500) + "..."
-          });
-        }
+        const chunks = chunkText(f.text || "", 4000);
+        chunks.forEach((chunk, i) => {
+          if (chunk.toLowerCase().includes(keyword.toLowerCase())) {
+            matches.push({
+              file: f.name,
+              system: f.system || "",
+              subsystem: f.subsystem || "",
+              excerpt: chunk.substring(0, 500) + "..."
+            });
+          }
+        });
       }
 
-      // Build structured table for AI
       const table = matches.map(m =>
         `${m.file} | ${m.system} | ${m.subsystem} | ${m.excerpt}`
       ).join("\n");
 
       const result = await callGemini(
-        `The user searched for keyword: "${keyword}". Here are the matches (in tabular form):\n${table}\n\nAnswer the query strictly based on this data.`
+        `The user searched for keyword: "${keyword}". Use these matches to answer deeply:\n${table}\n\nExplain in structured matrix format.`
       );
 
       return res.json({ result, matches });
     }
 
-    // Case 2: File upload mode
+    // File upload mode
     keyword = req.body.keyword;
     if (!keyword || !req.files?.length) {
       return res.status(400).json({ error: "Missing keyword or uploaded files" });
@@ -151,21 +178,23 @@ app.post("/search-multi", upload.array("files"), async (req, res) => {
       const text = await extractText(file.path, file.mimetype);
       fs.unlinkSync(file.path);
 
-      if (text.toLowerCase().includes(keyword.toLowerCase())) {
-        matches.push({
-          file: file.originalname,
-          excerpt: text.substring(0, 500) + "..."
-        });
-      }
+      const chunks = chunkText(text, 4000);
+      chunks.forEach((chunk, i) => {
+        if (chunk.toLowerCase().includes(keyword.toLowerCase())) {
+          matches.push({
+            file: file.originalname,
+            excerpt: chunk.substring(0, 500) + "..."
+          });
+        }
+      });
     }
 
-    let response = "Matches:\n";
-    matches.forEach(m => {
-      response += `\nFile: ${m.file}\nExcerpt: ${m.excerpt}\n`;
-    });
+    const response = matches.map(m =>
+      `File: ${m.file}\nExcerpt: ${m.excerpt}`
+    ).join("\n\n");
 
     const result = await callGemini(
-      `The user searched for keyword: "${keyword}". Here are raw matches:\n${response}\n\nSummarize and explain findings clearly.`
+      `User searched for keyword: "${keyword}". These are the matches:\n${response}\n\nSummarize findings in structured detail.`
     );
 
     res.json({ result, matches });
