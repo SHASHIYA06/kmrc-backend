@@ -7,6 +7,7 @@ import fetch from "node-fetch";
 import mammoth from "mammoth";
 import cors from "cors";
 import dotenv from "dotenv";
+import xlsx from "xlsx";   // ✅ Excel support
 
 dotenv.config();
 
@@ -18,19 +19,17 @@ app.use(cors({
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"]
 }));
-
 app.use(express.json());
 
 /**
- * Extract text from PDF/Images/DOCX
+ * Extract text OR structured table from files
  */
 async function extractText(filePath, mimetype) {
   try {
     if (mimetype === "application/pdf") {
       const data = await pdf(fs.readFileSync(filePath));
       if (data.text.trim()) return data.text;
-
-      return (await Tesseract.recognize(filePath, "eng")).data.text; // OCR fallback
+      return (await Tesseract.recognize(filePath, "eng")).data.text;
     }
 
     if (mimetype.startsWith("image/")) {
@@ -40,6 +39,28 @@ async function extractText(filePath, mimetype) {
     if (mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
       const result = await mammoth.extractRawText({ path: filePath });
       return result.value;
+    }
+
+    // 📊 Excel
+    if (
+      mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      mimetype === "application/vnd.ms-excel"
+    ) {
+      const workbook = xlsx.readFile(filePath);
+      let structuredTables = [];
+      workbook.SheetNames.forEach(sheetName => {
+        const sheet = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
+        structuredTables.push({
+          sheet: sheetName,
+          rows: sheet
+        });
+      });
+      return JSON.stringify(structuredTables, null, 2);
+    }
+
+    // 📑 CSV
+    if (mimetype === "text/csv") {
+      return fs.readFileSync(filePath, "utf8");
     }
 
     return "";
@@ -55,9 +76,7 @@ async function extractText(filePath, mimetype) {
 async function callGemini(prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
-  const body = {
-    contents: [{ parts: [{ text: prompt }]}]
-  };
+  const body = { contents: [{ parts: [{ text: prompt }]}] };
 
   const res = await fetch(url, {
     method: "POST",
@@ -84,7 +103,7 @@ function chunkText(text, chunkSize = 4000) {
 }
 
 /**
- * Deep AI Search: summarize-multi with chunking
+ * Deep AI Search + Summarization with Excel/CSV matrix support
  */
 app.post("/summarize-multi", async (req, res) => {
   try {
@@ -98,26 +117,37 @@ app.post("/summarize-multi", async (req, res) => {
     for (const f of files) {
       if (!f.text) continue;
 
-      const chunks = chunkText(f.text, 4000);
-      let summaries = [];
+      const isExcel = f.name.endsWith(".xlsx") || f.name.endsWith(".xls") || f.name.endsWith(".csv");
 
-      for (let i = 0; i < chunks.length; i++) {
-        const chunkPrompt = `User query: "${query}"\n\nFile: ${f.name}\nSystem: ${f.system || "N/A"}\nSubsystem: ${f.subsystem || "N/A"}\n\nContent chunk ${i+1}/${chunks.length}:\n${chunks[i]}\n\nAnswer based ONLY on this chunk.`;
-        const chunkResult = await callGemini(chunkPrompt);
-        summaries.push(chunkResult);
+      let fileSummary;
+      if (isExcel) {
+        // 📊 Special handling for Excel/CSV
+        fileSummary = await callGemini(
+          `User query: "${query}". The following is structured tabular data from file: ${f.name}.
+Format the answer as an interactive HTML table if possible.
+
+Data:\n${f.text}`
+        );
+      } else {
+        // Normal file → chunk text
+        const chunks = chunkText(f.text, 4000);
+        let summaries = [];
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkPrompt = `User query: "${query}"\n\nFile: ${f.name}\nSystem: ${f.system || "N/A"}\nSubsystem: ${f.subsystem || "N/A"}\n\nContent chunk ${i+1}/${chunks.length}:\n${chunks[i]}\n\nAnswer based ONLY on this chunk.`;
+          summaries.push(await callGemini(chunkPrompt));
+        }
+
+        fileSummary = await callGemini(
+          `User query: "${query}". Merge these partial summaries into one structured answer:\n${summaries.join("\n\n")}`
+        );
       }
 
-      // Merge summaries into one per file
-      const merged = await callGemini(
-        `User query: "${query}". Combine these partial summaries into one detailed, structured answer:\n\n${summaries.join("\n\n")}`
-      );
-
-      allSummaries.push(`📄 File: ${f.name}\n${merged}`);
+      allSummaries.push(`📄 File: ${f.name}\n${fileSummary}`);
     }
 
-    // Final answer across all files
+    // Final merged answer
     const finalAnswer = await callGemini(
-      `User query: "${query}". Combine and refine the following file-level summaries into one comprehensive report:\n\n${allSummaries.join("\n\n")}`
+      `User query: "${query}". Combine and refine the following file-level summaries into one comprehensive structured report:\n\n${allSummaries.join("\n\n")}`
     );
 
     res.json({ result: finalAnswer, details: allSummaries });
@@ -128,7 +158,7 @@ app.post("/summarize-multi", async (req, res) => {
 });
 
 /**
- * Keyword Search with Chunking (micro-level search)
+ * Keyword Search with Excel/CSV matrix support
  */
 app.post("/search-multi", upload.array("files"), async (req, res) => {
   try {
@@ -143,25 +173,32 @@ app.post("/search-multi", upload.array("files"), async (req, res) => {
 
       let matches = [];
       for (const f of files) {
-        const chunks = chunkText(f.text || "", 4000);
-        chunks.forEach((chunk, i) => {
-          if (chunk.toLowerCase().includes(keyword.toLowerCase())) {
-            matches.push({
-              file: f.name,
-              system: f.system || "",
-              subsystem: f.subsystem || "",
-              excerpt: chunk.substring(0, 500) + "..."
-            });
+        if (f.name.endsWith(".xlsx") || f.name.endsWith(".xls") || f.name.endsWith(".csv")) {
+          // Search inside Excel/CSV JSON text
+          if (f.text.toLowerCase().includes(keyword.toLowerCase())) {
+            matches.push({ file: f.name, excerpt: f.text.substring(0, 1000) + "..." });
           }
-        });
+        } else {
+          const chunks = chunkText(f.text || "", 4000);
+          chunks.forEach((chunk, i) => {
+            if (chunk.toLowerCase().includes(keyword.toLowerCase())) {
+              matches.push({
+                file: f.name,
+                system: f.system || "",
+                subsystem: f.subsystem || "",
+                excerpt: chunk.substring(0, 500) + "..."
+              });
+            }
+          });
+        }
       }
 
       const table = matches.map(m =>
-        `${m.file} | ${m.system} | ${m.subsystem} | ${m.excerpt}`
+        `${m.file} | ${m.system || ""} | ${m.subsystem || ""} | ${m.excerpt}`
       ).join("\n");
 
       const result = await callGemini(
-        `The user searched for keyword: "${keyword}". Use these matches to answer deeply:\n${table}\n\nExplain in structured matrix format.`
+        `The user searched for keyword: "${keyword}". Present matches in structured tabular format.\n\n${table}`
       );
 
       return res.json({ result, matches });
@@ -178,15 +215,9 @@ app.post("/search-multi", upload.array("files"), async (req, res) => {
       const text = await extractText(file.path, file.mimetype);
       fs.unlinkSync(file.path);
 
-      const chunks = chunkText(text, 4000);
-      chunks.forEach((chunk, i) => {
-        if (chunk.toLowerCase().includes(keyword.toLowerCase())) {
-          matches.push({
-            file: file.originalname,
-            excerpt: chunk.substring(0, 500) + "..."
-          });
-        }
-      });
+      if (text.toLowerCase().includes(keyword.toLowerCase())) {
+        matches.push({ file: file.originalname, excerpt: text.substring(0, 1000) + "..." });
+      }
     }
 
     const response = matches.map(m =>
@@ -194,7 +225,7 @@ app.post("/search-multi", upload.array("files"), async (req, res) => {
     ).join("\n\n");
 
     const result = await callGemini(
-      `User searched for keyword: "${keyword}". These are the matches:\n${response}\n\nSummarize findings in structured detail.`
+      `User searched for keyword: "${keyword}". Present matches in structured matrix/table format.\n\n${response}`
     );
 
     res.json({ result, matches });
