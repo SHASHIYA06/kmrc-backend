@@ -1,3 +1,4 @@
+// server.js
 // RAG Server for KMRCL — SHASHI SHEKHAR MISHRA
 // Features: Extraction (PDF/IMG/DOCX/XLSX/CSV) → Chunk → Embeddings (Gemini) → In-memory Vector Store → Ask
 
@@ -18,7 +19,6 @@ dotenv.config();
 const app = express();
 const upload = multer({ dest: "uploads/" });
 
-/* ------------------------------ CORS/JSON ------------------------------ */
 app.use(
   cors({
     origin: process.env.FRONTEND_URL || "*",
@@ -26,22 +26,17 @@ app.use(
     allowedHeaders: ["Content-Type"],
   })
 );
-app.use(express.json({ limit: "15mb" }));
+app.use(express.json({ limit: "25mb" }));
 
 /* ------------------------------ Globals ------------------------------ */
 
-// Simple in‑memory vector store
-// Each item: { id, fileName, mime, system, subsystem, meta, chunk, embedding: number[], sourceId, position }
 const VECTOR_STORE = [];
 let NEXT_ID = 1;
 
-// Configs
-const CHUNK_SIZE = 1200;     // characters
-const CHUNK_OVERLAP = 200;   // characters
-const MAX_SNIPPETS = 12;     // top-k snippets for answer
-const MAX_EMBED_TEXT = 6000; // safety limit per embed call
-
-/* ------------------------------ Utilities ------------------------------ */
+const CHUNK_SIZE = 1200;
+const CHUNK_OVERLAP = 200;
+const MAX_SNIPPETS = 12;
+const MAX_EMBED_TEXT = 6000;
 
 function ensureEnv() {
   if (!process.env.GEMINI_API_KEY) {
@@ -69,6 +64,7 @@ function chunkText(text, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
 }
 
 function cosineSim(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
@@ -78,11 +74,6 @@ function cosineSim(a, b) {
   return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
 }
 
-function toCSVTable(rows) {
-  if (!rows || !rows.length) return "";
-  return rows.map(r => r.map(v => String(v ?? "").replace(/\r?\n/g, " ").trim()).join(",")).join("\n");
-}
-
 /* ------------------------------ Extraction ------------------------------ */
 
 async function extractText(filePath, mimetype) {
@@ -90,13 +81,13 @@ async function extractText(filePath, mimetype) {
     // PDF
     if (mimetype === "application/pdf") {
       const data = await pdf(fs.readFileSync(filePath));
-      if (data.text && data.text.trim()) return data.text;
-      // Fallback OCR for scanned PDFs (last resort)
+      if (data && data.text && data.text.trim()) return data.text;
+      // Fallback OCR (scanned)
       const ocr = await Tesseract.recognize(filePath, "eng");
       return ocr.data.text || "";
     }
 
-    // Images (png/jpg/jpeg/webp/tiff/bmp)
+    // Images
     if (/^image\//i.test(mimetype)) {
       const ocr = await Tesseract.recognize(filePath, "eng");
       return ocr.data.text || "";
@@ -117,10 +108,9 @@ async function extractText(filePath, mimetype) {
       let out = [];
       workbook.SheetNames.forEach(sheetName => {
         const sheet = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true });
-        // Keep only non-empty rows
         const filtered = sheet.filter(row => row && row.some(c => c !== null && c !== undefined && String(c).trim() !== ""));
         if (filtered.length) {
-          out.push(`Sheet: ${sheetName}\n${toCSVTable(filtered)}`);
+          out.push(`Sheet: ${sheetName}\n${filtered.map(r => r.map(c => (c===undefined||c===null)?"":String(c)).join(" | ")).join("\n")}`);
         }
       });
       return out.join("\n\n");
@@ -131,7 +121,6 @@ async function extractText(filePath, mimetype) {
       return readTextSafe(filePath);
     }
 
-    // JSON/XML/HTML: return as string (best effort)
     if (/json|xml|html/.test(mimetype)) {
       return readTextSafe(filePath);
     }
@@ -182,7 +171,7 @@ async function geminiChat(prompt) {
 
 /* ------------------------------ Indexing (Ingest) ------------------------------ */
 
-// 1) Multipart ingest (upload files directly)
+// /ingest — multipart upload of files; server will extract + embed + add to VECTOR_STORE
 app.post("/ingest", upload.array("files"), async (req, res) => {
   try {
     if (!req.files?.length) return res.status(400).json({ error: "No files uploaded" });
@@ -195,11 +184,10 @@ app.post("/ingest", upload.array("files"), async (req, res) => {
 
       const raw = await extractText(filePath, mimetype);
       // cleanup temp file
-      fs.unlink(filePath, () => {});
+      try { fs.unlinkSync(filePath); } catch (e) {}
 
       if (!raw || !raw.trim()) continue;
 
-      // If it's tabular (XLSX/CSV), we keep it as table string, else plain text.
       const chunks = chunkText(raw);
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
@@ -227,7 +215,7 @@ app.post("/ingest", upload.array("files"), async (req, res) => {
   }
 });
 
-// 2) JSON ingest (from your Drive frontend that already has text extracted client-side)
+// /ingest-json — ingest pre-extracted JSON documents
 app.post("/ingest-json", async (req, res) => {
   try {
     const { documents } = req.body;
@@ -270,7 +258,7 @@ app.post("/ingest-json", async (req, res) => {
   }
 });
 
-// Clear the in-memory index
+// Clear index
 app.post("/clear", (req, res) => {
   VECTOR_STORE.length = 0;
   NEXT_ID = 1;
@@ -285,22 +273,18 @@ app.post("/ask", async (req, res) => {
     if (!query) return res.status(400).json({ error: "Missing query" });
     if (VECTOR_STORE.length === 0) return res.status(400).json({ error: "Index is empty. Ingest files first." });
 
-    // Embed query
     const qEmb = await geminiEmbed(query);
 
-    // Filter by system/subsystem if provided
     const candidates = VECTOR_STORE.filter(x => {
       const sysOk = system ? (x.system || "").toLowerCase().includes(system.toLowerCase()) : true;
       const subOk = subsystem ? (x.subsystem || "").toLowerCase().includes(subsystem.toLowerCase()) : true;
       return sysOk && subOk;
     });
 
-    // Score
     const scored = candidates.map(c => ({ ...c, score: cosineSim(qEmb, c.embedding) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.min(k, candidates.length));
 
-    // Build context with citations
     const contextBlocks = scored.map((c, idx) =>
       `[[${idx+1}]] File: ${c.fileName} (pos ${c.position})\n${c.chunk}`
     ).join("\n\n---\n\n");
@@ -327,7 +311,6 @@ Instructions:
 
     const answer = await geminiChat(prompt);
 
-    // Return answer + sources
     const sources = scored.map((s, i) => ({
       ref: i + 1,
       fileName: s.fileName,
@@ -345,15 +328,13 @@ Instructions:
 
 /* ------------------------------ Compatibility Endpoints ------------------------------ */
 
-// Keep your older frontend buttons working, but now powered by RAG.
-
+// summarize-multi — ingest JSON docs transiently then ask
 app.post("/summarize-multi", async (req, res) => {
   try {
     const { query, files } = req.body;
     if (!query || !files?.length) {
       return res.status(400).json({ error: "Missing query or files" });
     }
-    // Ingest the JSON docs transiently (does not clear existing index)
     const docs = files.map(f => ({
       fileName: f.name,
       text: f.text,
@@ -362,12 +343,17 @@ app.post("/summarize-multi", async (req, res) => {
       subsystem: f.subsystem || "",
       meta: {}
     }));
-    await fetch(`http://localhost:${process.env.PORT || 3000}/ingest-json`, {
+    // ingest-json
+    const ingestResp = await fetch(`http://localhost:${process.env.PORT || 3000}/ingest-json`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ documents: docs })
     });
-    // Now answer via RAG
+    const ingestData = await ingestResp.json();
+    if (!ingestResp.ok) {
+      console.warn("ingest-json failed", ingestData);
+    }
+    // ask
     const askRes = await fetch(`http://localhost:${process.env.PORT || 3000}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -382,13 +368,13 @@ app.post("/summarize-multi", async (req, res) => {
   }
 });
 
+// search-multi — ingest JSON docs then ask with keyword
 app.post("/search-multi", async (req, res) => {
   try {
     const { keyword, files } = req.body;
     if (!keyword || !files?.length) {
       return res.status(400).json({ error: "Missing keyword or files" });
     }
-    // Ingest (JSON mode)
     const docs = files.map(f => ({
       fileName: f.name,
       text: f.text,
@@ -403,7 +389,6 @@ app.post("/search-multi", async (req, res) => {
       body: JSON.stringify({ documents: docs })
     });
 
-    // Use /ask with keyword as query
     const askRes = await fetch(`http://localhost:${process.env.PORT || 3000}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -423,9 +408,7 @@ app.post("/search-multi", async (req, res) => {
 app.get("/health", (req, res) => res.json({ ok: true, indexed: VECTOR_STORE.length }));
 app.get("/stats", (req, res) => {
   const byFile = {};
-  VECTOR_STORE.forEach(v => {
-    byFile[v.fileName] = (byFile[v.fileName] || 0) + 1;
-  });
+  VECTOR_STORE.forEach(v => { byFile[v.fileName] = (byFile[v.fileName] || 0) + 1; });
   res.json({ totalChunks: VECTOR_STORE.length, byFile });
 });
 
