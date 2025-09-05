@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: drive-gemini-backend
+    runtime: node
+    region: oregon
+    plan: free
+    env: production
+    buildCommand: "npm install"
+    startCommand: "node server.js"
+    envVars:
+      - key: PORT
+        value: 5000
+      - key: GOOGLE_CLIENT_ID
+        fromSecret: GOOGLE_CLIENT_ID
+      - key: GOOGLE_CLIENT_SECRET
+        fromSecret: GOOGLE_CLIENT_SECRET
+      - key: GEMINI_API_KEY
+        fromSecret: GEMINI_API_KEY
+      - key: SESSION_SECRET
+        fromSecret: SESSION_SECRET
+      - key: GOOGLE_REDIRECT_URI
+        value: "https://drive-gemini-backend.onrender.com/auth/google/callback"
