@@ -1,3 +1,4 @@
+
 // server.js - Fixed for Render (CommonJS)
 require('dotenv').config();
 const express = require('express');
@@ -23,6 +24,135 @@ app.use(
   })
 );
 app.use(express.json({ limit: '15mb' }));
+
+
+// server.js - Fully Fixed for Render
+require('dotenv').config();
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
+const path = require('path');
+
+const app = express();
+
+// ✅ Fix: Use Render's PORT
+const PORT = process.env.PORT || 5000;
+
+// ✅ Fix: CORS for Netlify
+app.use(cors({
+  origin: ['https://bemlkmrcldocuemt.netlify.app', 'http://localhost:3000'],
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
+
+app.use(express.json({ limit: '15mb' }));
+
+// Serve static files (if needed)
+app.use(express.static('public'));
+
+// ✅ Health check (test if server is alive)
+app.get('/', (req, res) => {
+  res.send(`
+    <h1>✅ kmrc-backend is LIVE</h1>
+    <p>Server running on port ${PORT}</p>
+    <p><a href="/api/health">Go to /api/health</a></p>
+  `);
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    backend: 'kmrc-backend',
+    time: new Date().toISOString(),
+    port: PORT,
+    message: 'Your backend is working!'
+  });
+});
+
+// In-memory vector store (for demo)
+const VECTOR_STORE = [];
+let NEXT_ID = 1;
+
+// Mock Gemini functions (replace with real API calls)
+async function geminiEmbed(text) {
+  return Array(768).fill(0).map(() => Math.random());
+}
+
+async function geminiChat(prompt) {
+  return `{
+    "technicalSummary": "Panel 3001 uses 1.5mm² red wires for power distribution.",
+    "laymanSummary": "The main power wires are thick and red, connecting the control panel to motors.",
+    "wireDetails": [
+      { "id": "W1", "spec": "1.5mm²", "from": "Panel 3001", "to": "Motor A" }
+    ],
+    "components": [
+      { "name": "Relay X1", "type": "Electromechanical", "specs": { "voltage": "24VDC" } }
+    ],
+    "architectureSuggestion": "graph TD; A[Panel 3001] --> B(Motor A); A --> C(Motor B);"
+  }`;
+}
+
+// ✅ Safe JSON parser
+function safeJsonParse(str) {
+  try {
+    return JSON.parse(str.trim());
+  } catch (e) {
+    console.warn('JSON parse failed:', e.message);
+    return {
+      technicalSummary: `Parsing error: ${str.substring(0, 200)}...`,
+      laymanSummary: "Could not generate summary.",
+      wireDetails: [],
+      components: [],
+      architectureSuggestion: ""
+    };
+  }
+}
+
+// ✅ AI Analysis Endpoint
+app.post('/api/gemini/analyze', async (req, res) => {
+  const { fileContents, query } = req.body;
+
+  if (!fileContents || !query) {
+    return res.status(400).json({ error: 'Missing fileContents or query' });
+  }
+
+  const combinedText = fileContents
+    .map(f => `File: ${f.name}\n${f.content.substring(0, 1000)}...`)
+    .join('\n\n');
+
+  const prompt = `
+Respond in valid JSON only. No extra text.
+
+{
+  "technicalSummary": "",
+  "laymanSummary": "",
+  "wireDetails": [],
+  "components": [],
+  "architectureSuggestion": ""
+}
+
+Query: "${query}"
+Documents: ${combinedText}
+`;
+
+  try {
+    const rawOutput = await geminiChat(prompt);
+    const result = safeJsonParse(rawOutput);
+    res.json(result);
+  } catch (error) {
+    console.error('Gemini API failed:', error);
+    res.status(500).json({
+      error: 'AI analysis failed',
+      details: error.message
+    });
+  }
+});
+
+// ✅ Start server on 0.0.0.0 (critical for Render)
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 RAG server running on http://0.0.0.0:${PORT}`);
+  console.log(`✅ Access your app at https://kmrc-backend.onrender.com`);
+});
 
 /* ------------------------------ Globals ------------------------------ */
 const VECTOR_STORE = [];
