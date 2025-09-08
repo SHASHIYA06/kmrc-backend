@@ -1,5 +1,4 @@
-
-// server.js - Fixed for Render (CommonJS)
+// server.js - Fully Fixed for Render
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
@@ -15,42 +14,20 @@ const cors = require('cors');
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
-/* ------------------------------ CORS/JSON ------------------------------ */
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || 'https://your-netlify-site.netlify.app',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type'],
-  })
-);
-app.use(express.json({ limit: '15mb' }));
-
-
-// server.js - Fully Fixed for Render
-require('dotenv').config();
-const express = require('express');
-const multer = require('multer');
-const cors = require('cors');
-const path = require('path');
-
-const app = express();
-
-// ✅ Fix: Use Render's PORT
+// ✅ Use Render's PORT and bind to 0.0.0.0
 const PORT = process.env.PORT || 5000;
 
-// ✅ Fix: CORS for Netlify
+// ✅ Fix CORS for your Netlify app
 app.use(cors({
   origin: ['https://bemlkmrcldocuemt.netlify.app', 'http://localhost:3000'],
   methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type'],
   credentials: true
 }));
 
 app.use(express.json({ limit: '15mb' }));
 
-// Serve static files (if needed)
-app.use(express.static('public'));
-
-// ✅ Health check (test if server is alive)
+/* ------------------------------ Health Check ------------------------------ */
 app.get('/', (req, res) => {
   res.send(`
     <h1>✅ kmrc-backend is LIVE</h1>
@@ -67,91 +44,6 @@ app.get('/api/health', (req, res) => {
     port: PORT,
     message: 'Your backend is working!'
   });
-});
-
-// In-memory vector store (for demo)
-const VECTOR_STORE = [];
-let NEXT_ID = 1;
-
-// Mock Gemini functions (replace with real API calls)
-async function geminiEmbed(text) {
-  return Array(768).fill(0).map(() => Math.random());
-}
-
-async function geminiChat(prompt) {
-  return `{
-    "technicalSummary": "Panel 3001 uses 1.5mm² red wires for power distribution.",
-    "laymanSummary": "The main power wires are thick and red, connecting the control panel to motors.",
-    "wireDetails": [
-      { "id": "W1", "spec": "1.5mm²", "from": "Panel 3001", "to": "Motor A" }
-    ],
-    "components": [
-      { "name": "Relay X1", "type": "Electromechanical", "specs": { "voltage": "24VDC" } }
-    ],
-    "architectureSuggestion": "graph TD; A[Panel 3001] --> B(Motor A); A --> C(Motor B);"
-  }`;
-}
-
-// ✅ Safe JSON parser
-function safeJsonParse(str) {
-  try {
-    return JSON.parse(str.trim());
-  } catch (e) {
-    console.warn('JSON parse failed:', e.message);
-    return {
-      technicalSummary: `Parsing error: ${str.substring(0, 200)}...`,
-      laymanSummary: "Could not generate summary.",
-      wireDetails: [],
-      components: [],
-      architectureSuggestion: ""
-    };
-  }
-}
-
-// ✅ AI Analysis Endpoint
-app.post('/api/gemini/analyze', async (req, res) => {
-  const { fileContents, query } = req.body;
-
-  if (!fileContents || !query) {
-    return res.status(400).json({ error: 'Missing fileContents or query' });
-  }
-
-  const combinedText = fileContents
-    .map(f => `File: ${f.name}\n${f.content.substring(0, 1000)}...`)
-    .join('\n\n');
-
-  const prompt = `
-Respond in valid JSON only. No extra text.
-
-{
-  "technicalSummary": "",
-  "laymanSummary": "",
-  "wireDetails": [],
-  "components": [],
-  "architectureSuggestion": ""
-}
-
-Query: "${query}"
-Documents: ${combinedText}
-`;
-
-  try {
-    const rawOutput = await geminiChat(prompt);
-    const result = safeJsonParse(rawOutput);
-    res.json(result);
-  } catch (error) {
-    console.error('Gemini API failed:', error);
-    res.status(500).json({
-      error: 'AI analysis failed',
-      details: error.message
-    });
-  }
-});
-
-// ✅ Start server on 0.0.0.0 (critical for Render)
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 RAG server running on http://0.0.0.0:${PORT}`);
-  console.log(`✅ Access your app at https://kmrc-backend.onrender.com`);
 });
 
 /* ------------------------------ Globals ------------------------------ */
@@ -194,9 +86,7 @@ function chunkText(text, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
 }
 
 function cosineSim(a, b) {
-  let dot = 0,
-    na = 0,
-    nb = 0;
+  let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     na += a[i] * a[i];
@@ -208,36 +98,31 @@ function cosineSim(a, b) {
 function toCSVTable(rows) {
   if (!rows || !rows.length) return '';
   return rows
-    .map((r) =>
-      r
-        .map((v) => String(v ?? '').replace(/\r?\n/g, ' ').trim())
-        .join(',')
-    )
+    .map(r => r.map(v => String(v ?? '').replace(/\r?\n/g, ' ').trim()).join(','))
     .join('\n');
 }
 
 function looksTabular(text) {
   if (!text) return false;
   const lines = text.split(/\r?\n/).slice(0, 30);
-  const commas = lines.map((l) => (l.match(/,/g) || []).length);
+  const commas = lines.map(l => (l.match(/,/g) || []).length);
   const avg = commas.reduce((a, b) => a + b, 0) / Math.max(1, commas.length);
   return avg > 2;
 }
 
 function getInternalBase() {
-  const port = process.env.PORT || 3000;
-  return `http://127.0.0.1:${port}`;
+  return `http://127.0.0.1:${PORT}`;
 }
 
 /* ------------------------------ Tabular helpers ------------------------------ */
 function xlsxToTables(filePath) {
   const workbook = xlsx.readFile(filePath);
   const tables = [];
-  workbook.SheetNames.forEach((sheetName) => {
+  workbook.SheetNames.forEach(sheetName => {
     const sheet = workbook.Sheets[sheetName];
     const aoa = xlsx.utils.sheet_to_json(sheet, { header: 1, raw: true });
     if (!aoa || !aoa.length) return;
-    const headers = (aoa[0] || []).map((h) => String(h ?? '').trim());
+    const headers = (aoa[0] || []).map(h => String(h ?? '').trim());
     const rows = [];
     for (let r = 1; r < aoa.length; r++) {
       const rowAoA = aoa[r] || [];
@@ -245,7 +130,7 @@ function xlsxToTables(filePath) {
       headers.forEach((h, i) => {
         obj[h || `Col${i + 1}`] = rowAoA[i] ?? '';
       });
-      const anyVal = Object.values(obj).some((v) => String(v).trim() !== '');
+      const anyVal = Object.values(obj).some(v => String(v).trim() !== '');
       if (anyVal) rows.push(obj);
     }
     if (rows.length) tables.push({ sheetName, headers, rows });
@@ -254,11 +139,11 @@ function xlsxToTables(filePath) {
 }
 
 function csvToTable(text) {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length);
   if (lines.length < 2) return null;
   const split = (s) => s.split(',');
-  const headers = split(lines[0]).map((h) => h.trim());
-  const rows = lines.slice(1).map((line) => {
+  const headers = split(lines[0]).map(h => h.trim());
+  const rows = lines.slice(1).map(line => {
     const vals = split(line);
     const obj = {};
     headers.forEach((h, i) => (obj[h || `Col${i + 1}`] = (vals[i] ?? '').trim()));
@@ -269,13 +154,7 @@ function csvToTable(text) {
 }
 
 function tableRowToString(fileName, sheetName, headers, rowObj) {
-  const pairs = headers.map(
-    (h) =>
-      `${h}: ${String(rowObj[h] ?? '')
-        .toString()
-        .replace(/\s+/g, ' ')
-        .trim()}`
-  );
+  const pairs = headers.map(h => `${h}: ${String(rowObj[h] ?? '').toString().replace(/\s+/g, ' ').trim()}`);
   return `FILE: ${fileName}${sheetName ? ` | SHEET: ${sheetName}` : ''} | ${pairs.join(' | ')}`;
 }
 
@@ -305,10 +184,10 @@ async function extractText(filePath, mimetype) {
     ) {
       const workbook = xlsx.readFile(filePath);
       let out = [];
-      workbook.SheetNames.forEach((sheetName) => {
+      workbook.SheetNames.forEach(sheetName => {
         const sheet = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true });
-        const filtered = sheet.filter((row) =>
-          row && row.some((c) => c !== null && c !== undefined && String(c).trim() !== '')
+        const filtered = sheet.filter(row =>
+          row && row.some(c => c !== null && c !== undefined && String(c).trim() !== '')
         );
         if (filtered.length) {
           out.push(`Sheet: ${sheetName}\n${toCSVTable(filtered)}`);
@@ -524,24 +403,21 @@ app.post('/ask', async (req, res) => {
 
     const qEmb = await geminiEmbed(query);
 
-    const candidates = VECTOR_STORE.filter((x) => {
+    const candidates = VECTOR_STORE.filter(x => {
       const sysOk = system ? (x.system || '').toLowerCase().includes(system.toLowerCase()) : true;
       const subOk = subsystem ? (x.subsystem || '').toLowerCase().includes(subsystem.toLowerCase()) : true;
       return sysOk && subOk;
     });
 
     const scored = candidates
-      .map((c) => ({ ...c, score: cosineSim(qEmb, c.embedding) }))
+      .map(c => ({ ...c, score: cosineSim(qEmb, c.embedding) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.min(k, candidates.length));
 
-    const hasTabular = scored.some((s) => looksTabular(s.chunk) || (s.meta && (s.meta.type === 'row' || s.meta.headers)));
+    const hasTabular = scored.some(s => looksTabular(s.chunk) || (s.meta && (s.meta.type === 'row' || s.meta.headers)));
 
     const contextBlocks = scored
-      .map(
-        (c, idx) =>
-          `[[${idx + 1}]] File: ${c.fileName} (pos ${c.position})\n${c.chunk}`
-      )
+      .map((c, idx) => `[[${idx + 1}]] File: ${c.fileName} (pos ${c.position})\n${c.chunk}`)
       .join('\n\n---\n\n');
 
     const prompt = `
@@ -599,7 +475,7 @@ app.post('/summarize-multi', async (req, res) => {
     const { query, files } = req.body;
     if (!query || !files?.length) return res.status(400).json({ error: 'Missing query or files' });
 
-    const docs = files.map((f) => ({
+    const docs = files.map(f => ({
       fileName: f.name,
       text: f.text,
       mime: f.meta || 'text/plain',
@@ -635,7 +511,7 @@ app.post('/search-multi', async (req, res) => {
     const { keyword, files } = req.body;
     if (!keyword || !files?.length) return res.status(400).json({ error: 'Missing keyword or files' });
 
-    const docs = files.map((f) => ({
+    const docs = files.map(f => ({
       fileName: f.name,
       text: f.text,
       mime: f.meta || 'text/plain',
@@ -667,17 +543,16 @@ app.post('/search-multi', async (req, res) => {
 });
 
 /* ------------------------------ Diagnostics ------------------------------ */
-app.get('/health', (req, res) => res.json({ ok: true, indexed: VECTOR_STORE.length }));
 app.get('/stats', (req, res) => {
   const byFile = {};
-  VECTOR_STORE.forEach((v) => {
+  VECTOR_STORE.forEach(v => {
     byFile[v.fileName] = (byFile[v.fileName] || 0) + 1;
   });
   res.json({ totalChunks: VECTOR_STORE.length, byFile });
 });
 
 /* ------------------------------ Server ------------------------------ */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 RAG server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 RAG server running on http://0.0.0.0:${PORT}`);
+  console.log(`✅ Access your app at https://kmrc-backend.onrender.com`);
 });
