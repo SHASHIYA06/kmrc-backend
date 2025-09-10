@@ -1,17 +1,21 @@
-// server.js - Fixed for Render (CommonJS)
-require('dotenv').config();
-const express = require('express');
-const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
-const pdf = require('pdf-parse');
-const Tesseract = require('tesseract.js');
-const fetch = require('node-fetch');
-const mammoth = require('mammoth');
-const xlsx = require('xlsx');
-const cors = require('cors');
+// server.js - ES Modules version
+import express from 'express';
+import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
+import pdf from 'pdf-parse';
+import Tesseract from 'tesseract.js';
+import fetch from 'node-fetch';
+import mammoth from 'mammoth';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import xlsx from 'xlsx';
+
+dotenv.config();
 const app = express();
 const upload = multer({ dest: 'uploads/' });
+
+
 
 //  ✅  Fix: Use Render's PORT
 const PORT = process.env.PORT || 5000;
