@@ -1,28 +1,51 @@
-// server.js - Fixed version
+// server.js - Fully Fixed for Render
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const { PDFDocument } = require('pdf-lib');
+const pdf = require('pdf-parse');
 const Tesseract = require('tesseract.js');
 const fetch = require('node-fetch');
 const mammoth = require('mammoth');
-const cors = require('cors');
 const xlsx = require('xlsx');
-
+const cors = require('cors');
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
-/* ------------------------------ CORS/JSON ------------------------------ */
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type'],
-  })
-);
+// ✅ Fix: Use Render's PORT and bind to 0.0.0.0
+const PORT = process.env.PORT || 5000;
+
+// ✅ Fix: CORS for Netlify
+app.use(cors({
+  origin: ['https://bemlkmrcldocuemt.netlify.app', 'http://localhost:3000'],
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type'],
+  credentials: true
+}));
+
 app.use(express.json({ limit: '15mb' }));
+
+// ✅ Add this root route handler to fix "CANNOT GET" error
+app.get('/', (req, res) => {
+  res.send(`
+    <h1>✅ KMRC Backend is LIVE</h1>
+    <p>Server running on port ${PORT}</p>
+    <p><a href="/api/health">Check Health Status</a></p>
+    <p>This is the backend API server. Use the frontend at <a href="https://bemlkmrcldocuemt.netlify.app">https://bemlkmrcldocuemt.netlify.app</a> to interact with the system.</p>
+  `);
+});
+
+// ✅ Add health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    backend: 'kmrc-backend',
+    time: new Date().toISOString(),
+    port: PORT,
+    message: 'Your backend is working perfectly!'
+  });
+});
 
 /* ------------------------------ Globals ------------------------------ */
 const VECTOR_STORE = [];
@@ -74,7 +97,9 @@ function cosineSim(a, b) {
 
 function toCSVTable(rows) {
   if (!rows || !rows.length) return '';
-  return rows.map(r => r.map(v => String(v ?? '').replace(/\r?\n/g, ' ').trim()).join(',')).join('\n');
+  return rows
+    .map(r => r.map(v => String(v ?? '').replace(/\r?\n/g, ' ').trim()).join(','))
+    .join('\n');
 }
 
 function looksTabular(text) {
@@ -86,8 +111,7 @@ function looksTabular(text) {
 }
 
 function getInternalBase() {
-  const port = process.env.PORT || 3000;
-  return `http://127.0.0.1:${port}`;
+  return `http://127.0.0.1:${PORT}`;
 }
 
 /* ------------------------------ Tabular helpers ------------------------------ */
@@ -137,35 +161,20 @@ function tableRowToString(fileName, sheetName, headers, rowObj) {
 /* ------------------------------ Extraction ------------------------------ */
 async function extractText(filePath, mimetype) {
   try {
-    // PDF
     if (mimetype === 'application/pdf') {
-      const pdfBuffer = fs.readFileSync(filePath);
-      const pdfDoc = await PDFDocument.load(pdfBuffer);
-      let text = '';
-      for (let i = 0; i < pdfDoc.getPageCount(); i++) {
-        const page = pdfDoc.getPage(i);
-        // Note: pdf-lib doesn't extract text directly, so we'll use a fallback
-        // In production, you might want to use a different library or service for PDF text extraction
-        text += `[PDF Page ${i + 1}] `;
-      }
-      // If we need actual text extraction, we can fall back to Tesseract for scanned PDFs
-      if (text.trim() === '') {
-        const ocr = await Tesseract.recognize(filePath, 'eng');
-        return ocr.data.text || '';
-      }
-      return text;
+      const data = await pdf(fs.readFileSync(filePath));
+      if (data.text && data.text.trim()) return data.text;
+      const ocr = await Tesseract.recognize(filePath, 'eng');
+      return ocr.data.text || '';
     }
-    // Images (png/jpg/jpeg/webp/tiff/bmp)
     if (/^image\//i.test(mimetype)) {
       const ocr = await Tesseract.recognize(filePath, 'eng');
       return ocr.data.text || '';
     }
-    // DOCX
     if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       const result = await mammoth.extractRawText({ path: filePath });
       return result.value || '';
     }
-    // XLSX / XLS
     if (
       mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
       mimetype === 'application/vnd.ms-excel'
@@ -183,11 +192,9 @@ async function extractText(filePath, mimetype) {
       });
       return out.join('\n\n');
     }
-    // CSV / plain text
     if (mimetype === 'text/csv' || mimetype === 'text/plain') {
       return readTextSafe(filePath);
     }
-    // JSON/XML/HTML
     if (/json|xml|html/.test(mimetype)) {
       return readTextSafe(filePath);
     }
@@ -212,9 +219,7 @@ async function geminiEmbed(text) {
     body: JSON.stringify(body),
   });
   const raw = await res.text();
-  if (!res.ok) {
-    throw new Error(`Gemini embed error ${res.status}: ${raw}`);
-  }
+  if (!res.ok) throw new Error(`Gemini embed error ${res.status}: ${raw}`);
   const data = JSON.parse(raw);
   return data.embedding?.values || [];
 }
@@ -275,7 +280,7 @@ app.post('/ingest', upload.array('files'), async (req, res) => {
         console.warn('Row-level XLSX ingest warning:', e.message);
       }
       const raw = await extractText(filePath, mimetype);
-      fs.unlinkSync(filePath);
+      fs.unlink(filePath, () => {});
       if (!raw || !raw.trim()) continue;
       const chunks = chunkText(raw);
       for (let i = 0; i < chunks.length; i++) {
@@ -440,9 +445,7 @@ Formatting rules:
 app.post('/summarize-multi', async (req, res) => {
   try {
     const { query, files } = req.body;
-    if (!query || !files?.length) {
-      return res.status(400).json({ error: 'Missing query or files' });
-    }
+    if (!query || !files?.length) return res.status(400).json({ error: 'Missing query or files' });
     const docs = files.map(f => ({
       fileName: f.name,
       text: f.text,
@@ -474,9 +477,7 @@ app.post('/summarize-multi', async (req, res) => {
 app.post('/search-multi', async (req, res) => {
   try {
     const { keyword, files } = req.body;
-    if (!keyword || !files?.length) {
-      return res.status(400).json({ error: 'Missing keyword or files' });
-    }
+    if (!keyword || !files?.length) return res.status(400).json({ error: 'Missing keyword or files' });
     const docs = files.map(f => ({
       fileName: f.name,
       text: f.text,
@@ -506,7 +507,6 @@ app.post('/search-multi', async (req, res) => {
 });
 
 /* ------------------------------ Diagnostics ------------------------------ */
-app.get('/health', (req, res) => res.json({ ok: true, indexed: VECTOR_STORE.length }));
 app.get('/stats', (req, res) => {
   const byFile = {};
   VECTOR_STORE.forEach(v => {
@@ -516,7 +516,7 @@ app.get('/stats', (req, res) => {
 });
 
 /* ------------------------------ Server ------------------------------ */
-const PORT = process.env.PORT || 3000;
+// ✅ Start server on 0.0.0.0 (critical for Render)
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 RAG server running on http://0.0.0.0:${PORT}`);
   console.log(`✅ Access your app at https://kmrc-backend.onrender.com`);
