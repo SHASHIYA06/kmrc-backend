@@ -1,4 +1,4 @@
-// server.js - Fully Fixed for Render with Google Drive Integration
+// server.js - Fully Fixed with All Advanced Features
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
@@ -16,7 +16,7 @@ const upload = multer({ dest: 'uploads/' });
 // ✅ Fix: Use Render's PORT and bind to 0.0.0.0
 const PORT = process.env.PORT || 5000;
 
-// ✅ Fix: CORS for Netlify - REMOVED EXTRA SPACES
+// ✅ Fix: CORS for Netlify
 app.use(cors({
   origin: ['https://bemlkmrcldocuemt.netlify.app', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -464,7 +464,7 @@ async function geminiEmbed(text) {
 async function geminiChat(prompt, model = "gemini-1.5-flash") {
   ensureEnv();
   // ✅ FIXED: Removed extra spaces in URL
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
   const body = { contents: [{ parts: [{ text: prompt }] }] };
   const res = await fetch(url, {
     method: "POST",
@@ -905,7 +905,7 @@ Important: Return only the JSON object. No extra text, no markdown, no explanati
 If information is not available in the documents, indicate that in the summaries.
 `;
     
-    // ✅ FIXED: Removed extra spaces in URL
+    // Call Gemini API
     const geminiResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
